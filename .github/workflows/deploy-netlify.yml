@@ -1,0 +1,146 @@
+name: Deploy to Netlify
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+        
+    - name: Install dependencies
+      run: |
+        npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+        
+    - name: Run linting (continue on error)
+      run: |
+        npm run lint || echo "Linting failed but continuing..."
+      continue-on-error: true
+      
+    - name: Build application
+      run: npm run build
+      env:
+        NODE_ENV: production
+        
+    - name: Copy essential files from deploy folder
+      run: |
+        # Criar diretório se não existir
+        mkdir -p dist
+        
+        # Copiar arquivos essenciais se existirem
+        [ -f deploy/_headers ] && cp deploy/_headers dist/ || echo "_headers not found"
+        [ -f deploy/_redirects ] && cp deploy/_redirects dist/ || echo "_redirects not found"
+        [ -f deploy/robots.txt ] && cp deploy/robots.txt dist/ || echo "robots.txt not found"
+        [ -f deploy/sitemap.xml ] && cp deploy/sitemap.xml dist/ || echo "sitemap.xml not found"
+        [ -f deploy/manifest.json ] && cp deploy/manifest.json dist/ || echo "manifest.json not found"
+        
+        # Copiar do public se não existir no deploy
+        [ ! -f dist/_redirects ] && [ -f public/_redirects ] && cp public/_redirects dist/ || echo "No _redirects found"
+        [ ! -f dist/robots.txt ] && [ -f public/robots.txt ] && cp public/robots.txt dist/ || echo "No robots.txt found"
+        [ ! -f dist/sitemap.xml ] && [ -f public/sitemap.xml ] && cp public/sitemap.xml dist/ || echo "No sitemap.xml found"
+        [ ! -f dist/manifest.json ] && [ -f public/manifest.json ] && cp public/manifest.json dist/ || echo "No manifest.json found"
+        
+    - name: Verify critical files
+      run: |
+        if [ ! -f dist/index.html ]; then
+          echo "❌ Critical file missing: index.html"
+          exit 1
+        fi
+        echo "✅ Critical files verified"
+        
+    - name: Build analysis
+      run: |
+        echo "📊 Build Analysis:"
+        echo "=================="
+        echo "📁 Dist directory contents:"
+        ls -la dist/ || echo "Dist directory not found"
+        echo ""
+        echo "📏 Dist directory size:"
+        du -sh dist/ || echo "Cannot calculate size"
+        echo ""
+        echo "🔍 Large files (>1MB):"
+        find dist/ -type f -size +1M -exec ls -lh {} \; 2>/dev/null || echo "No large files found"
+        
+    - name: Deploy to Netlify
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      uses: nwtgck/actions-netlify@v3.0
+      with:
+        publish-dir: './dist'
+        production-branch: main
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        deploy-message: "Deploy from GitHub Actions - ${{ github.sha }}"
+        enable-pull-request-comment: true
+        enable-commit-comment: true
+        overwrites-pull-request-comment: true
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        
+    - name: Deploy Preview to Netlify (for PRs)
+      if: github.event_name == 'pull_request'
+      uses: nwtgck/actions-netlify@v3.0
+      with:
+        publish-dir: './dist'
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        deploy-message: "Preview deploy from PR #${{ github.event.number }}"
+        alias: deploy-preview-${{ github.event.number }}
+        enable-pull-request-comment: true
+        enable-commit-comment: true
+        overwrites-pull-request-comment: true
+      env:
+        NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+        NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        
+    - name: Generate deployment report
+      run: |
+        echo "# 📋 Netlify Deployment Report" > netlify-deployment-report.md
+        echo "**Date:** $(date)" >> netlify-deployment-report.md
+        echo "**Commit:** ${{ github.sha }}" >> netlify-deployment-report.md
+        echo "**Branch:** ${{ github.ref_name }}" >> netlify-deployment-report.md
+        echo "**Node Version:** ${{ matrix.node-version }}" >> netlify-deployment-report.md
+        echo "**Event:** ${{ github.event_name }}" >> netlify-deployment-report.md
+        echo "" >> netlify-deployment-report.md
+        echo "## 📁 Build Contents" >> netlify-deployment-report.md
+        echo "\`\`\`" >> netlify-deployment-report.md
+        ls -la dist/ >> netlify-deployment-report.md 2>/dev/null || echo "Dist directory not found" >> netlify-deployment-report.md
+        echo "\`\`\`" >> netlify-deployment-report.md
+        echo "" >> netlify-deployment-report.md
+        echo "## 📏 Size Analysis" >> netlify-deployment-report.md
+        echo "**Total Size:** $(du -sh dist/ 2>/dev/null | cut -f1 || echo 'Unknown')" >> netlify-deployment-report.md
+        echo "" >> netlify-deployment-report.md
+        echo "## 🔧 Configuration Files" >> netlify-deployment-report.md
+        echo "- **_redirects:** $([ -f dist/_redirects ] && echo '✅ Present' || echo '❌ Missing')" >> netlify-deployment-report.md
+        echo "- **_headers:** $([ -f dist/_headers ] && echo '✅ Present' || echo '❌ Missing')" >> netlify-deployment-report.md
+        echo "- **robots.txt:** $([ -f dist/robots.txt ] && echo '✅ Present' || echo '❌ Missing')" >> netlify-deployment-report.md
+        echo "- **sitemap.xml:** $([ -f dist/sitemap.xml ] && echo '✅ Present' || echo '❌ Missing')" >> netlify-deployment-report.md
+        echo "- **manifest.json:** $([ -f dist/manifest.json ] && echo '✅ Present' || echo '❌ Missing')" >> netlify-deployment-report.md
+        
+    - name: Upload deployment report
+      uses: actions/upload-artifact@v4
+      with:
+        name: netlify-deployment-report-${{ matrix.node-version }}
+        path: netlify-deployment-report.md
+        
+    - name: Deployment success notification
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      run: |
+        echo "🚀 Netlify deployment successful!"
+        echo "✅ DialogaMente está agora disponível no Netlify!"
+        echo "📍 Verifique o deploy no painel do Netlify"
